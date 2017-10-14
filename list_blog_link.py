@@ -4,18 +4,52 @@ import re
 import os
 import json
 import redis
+import shutil
 import requests
+import subprocess
 import multiprocessing
 from collections import defaultdict
 from bs4 import BeautifulSoup
 from bs4 import SoupStrainer
 
-homepage = 'http://ffuyue.pixnet.net/blog'
-home_dir = 'http://ffuyue.pixnet.net'
+git_dir = 'bc5678.github.io'
 collected_data = defaultdict(list)
 
-def write_blog_link():
-	fix_link_title = '<p style="margin: 0px 0px 1em; padding: 0px; color: rgb(85, 85, 85); font-family: Verdana;"><span style="font-family:arial,helvetica,sans-serif"><span style="font-size:16px">-延伸閱讀-</span></span></p>\n'
+def prepare_html_folder():
+	git_html_addr = 'https://github.com/bc5678/bc5678.github.io.git'
+	if os.path.exists(git_dir):
+		shutil.rmtree(git_dir)
+	subprocess.call(('git clone ' + git_html_addr).split())
+
+
+def upload_html():
+	os.chdir(git_dir)
+	subprocess.call('git add *.html'.split())
+	subprocess.call('git commit -m "auto_commit"'.split())
+	subprocess.call('git push origin master'.split())
+
+
+def collect_data():
+	global collected_data
+	collected_data.clear()
+	conn = redis.Redis()
+	result = conn.lrange('list_blog_link', 0, -1)
+	for r in result:
+		collected_data.update(json.loads(r.decode()))
+
+
+def write_html():
+	HTML_HEAD = '''<html>
+<head>
+    <title> </title>
+</head>
+<body>
+	<p style="margin: 0px 0px 1em; padding: 0px; color: rgb(85, 85, 85); font-family: Verdana;"><span style="font-family:arial,helvetica,sans-serif"><span style="font-size:16px">-延伸閱讀-</span></span></p>
+'''
+	HTML_TAIL = '''
+</body>
+</html>
+'''
 	fix_type_content_part1 = '<p style="margin: 0px 0px 1em; padding: 0px; color: rgb(84, 155, 237);"><span style="font-family:arial,helvetica,sans-serif; font-size:18px;"><strong>'
 	fix_type_content_part2 = '</strong></span></p>\n'
 
@@ -23,21 +57,43 @@ def write_blog_link():
 	fix_link_content_part2 = ' target="_blank">'
 	fix_link_content_part3 = '</a></span></strong></p>\n'
 
-	output = fix_link_title
-	for category, article_list in sorted(collected_data.items()):
-		output += fix_type_content_part1
-		output += category
-		output += fix_type_content_part2
-		for link_title_pair in article_list:
-			output += fix_link_content_part1
-			output += '<a href="{:s}"'.format(link_title_pair[0])
-			output += fix_link_content_part2
-			output += link_title_pair[1]
-			output += fix_link_content_part3
-		output += '\n\n'
+	HTML_TABLE = [\
+('link_taipei_zhongzheng_station.html', ['台北中正', '台北北車']),\
+('link_taipei_daan.html', ['台北大安']),\
+('link_taipei_nangang.html', ['台北南港']),\
+('link_taipei_neihu.html', ['台北內湖']),\
+('link_taipei_shilin.html', ['台北士林']),\
+('link_taipei_songshan_minsheng.html', ['台北松山', '台北民生社區']),\
+('link_taipei_wanhua.html', ['台北萬華']),\
+('link_taipei_xinyi.html', ['台北信義']),\
+('link_taipei_zhongshan_dazhi.html', ['台北中山', '台北大直']),\
+('link_taiwan_instant_food.html', ['台灣‧速食']),\
+]
 
-	with open('links.txt', 'wt') as fout:
-		fout.write(output)
+	for entry in HTML_TABLE:
+		with open(os.path.join(git_dir, entry[0]), 'wt') as fout:
+			fout.write(HTML_HEAD)
+
+	for category, article_list in sorted(collected_data.items()):
+		output_str = ''
+		output_str += fix_type_content_part1
+		output_str += category
+		output_str += fix_type_content_part2
+		for link_title_pair in article_list:
+			output_str += fix_link_content_part1
+			output_str += '<a href="{:s}"'.format(link_title_pair[0])
+			output_str += fix_link_content_part2
+			output_str += link_title_pair[1]
+			output_str += fix_link_content_part3
+		for html in HTML_TABLE:
+			for keyword in html[1]:
+				if keyword in category:
+					with open(os.path.join(git_dir, html[0]), 'at') as fout:
+						fout.write(output_str)
+
+	for entry in HTML_TABLE:
+		with open(os.path.join(git_dir, entry[0]), 'at') as fout:
+			fout.write(HTML_TAIL)
 
 
 def get_link(text):
@@ -68,7 +124,12 @@ def visit_category(link):
 
 
 if '__main__' == __name__:
-	os.system('redis-server &')
+	homepage = 'http://ffuyue.pixnet.net/blog'
+	home_dir = 'http://ffuyue.pixnet.net'
+
+	pfolder = multiprocessing.Process(target = prepare_html_folder)
+	pfolder.start()
+	subprocess.call('redis-server &', shell=True)
 
 	req = requests.get(homepage)
 	req.encoding = 'utf8'
@@ -87,11 +148,9 @@ if '__main__' == __name__:
 	for p in plist:
 		p.join()
 
-	collected_data.clear()
-	conn = redis.Redis()
-	result = conn.lrange('list_blog_link', 0, -1)
-	for r in result:
-		collected_data.update(json.loads(r.decode()))
-	
-	write_blog_link()
-	os.system('redis-cli shutdown')
+	collect_data()
+	subprocess.call('redis-cli shutdown &', shell=True)
+
+	pfolder.join()
+	write_html()
+	upload_html()
